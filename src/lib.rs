@@ -36,7 +36,7 @@ pub fn cast(input: TokenStream) -> TokenStream {
                 .attrs
                 .iter()
                 .fold(None, |acc, attrs| {
-                    if acc.is_none() {
+                    if acc.is_none() && attrs.path().is_ident("cast") {
                         Some(Opts::from_meta(&attrs.meta).unwrap())
                     } else {
                         acc
@@ -62,7 +62,6 @@ pub fn cast(input: TokenStream) -> TokenStream {
         .iter()
         .map(|(name, _, opts)| {
             if let Some(convert) = opts.apply.clone() {
-                println!("convert {:?}", convert);
                 quote!(
                     self.#name.push(#convert(item.#name))
                 )
