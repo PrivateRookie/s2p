@@ -1,21 +1,19 @@
-use darling::{FromMeta};
+use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Ident, Type};
+use syn::{parse_macro_input, Data, DeriveInput, Ident};
 
 #[derive(Default, FromMeta)]
 #[darling(default)]
 struct Opts {
-    t: Option<Ident>,
     apply: Option<syn::Path>,
-    col: Option<String>,
+    col: Option<Ident>,
 }
 
 #[proc_macro_derive(Cast, attributes(cast))]
 pub fn cast(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let ident = input.ident.clone();
-    let helper = Ident::new(&format!("{}Collector", input.ident), input.ident.span());
     let data = match input.data {
         Data::Struct(data) => data,
         _ => {
@@ -28,95 +26,49 @@ pub fn cast(input: TokenStream) -> TokenStream {
             panic!("only support named field")
         }
     };
-    let fields: Vec<(Ident, Type, Opts)> = fields
-        .named
-        .into_iter()
-        .map(|f| {
-            let opts = f
-                .attrs
-                .iter()
-                .fold(None, |acc, attrs| {
-                    if acc.is_none() && attrs.path().is_ident("cast") {
-                        Some(Opts::from_meta(&attrs.meta).unwrap())
-                    } else {
-                        acc
-                    }
-                })
-                .unwrap_or_default();
-
-            (f.ident.unwrap(), f.ty, opts)
-        })
-        .collect();
-    let fields_def: Vec<_> = fields
-        .iter()
-        .map(|(name, ty, opts)| match opts.t.clone() {
-            Some(ty) => {
-                quote!(#name: std::vec::Vec<#ty>)
-            }
-            None => {
-                quote!(#name: std::vec::Vec<#ty>)
-            }
-        })
-        .collect();
-    let append_def: Vec<_> = fields
-        .iter()
-        .map(|(name, _, opts)| {
-            if let Some(convert) = opts.apply.clone() {
-                quote!(
-                    self.#name.push(#convert(item.#name))
-                )
+    let mut left_fields = vec![];
+    let mut init_tuple = vec![];
+    let mut trans = vec![];
+    let mut to_df = vec![];
+    for (idx, f) in fields.named.iter().enumerate() {
+        let idx = syn::Index::from(idx);
+        let ident = f.ident.clone().unwrap();
+        let opt = f.attrs.iter().fold(None, |acc, attrs| {
+            if acc.is_none() && attrs.path().is_ident("cast") {
+                Some(Opts::from_meta(&attrs.meta).unwrap())
             } else {
-                quote!(self.#name.push(item.#name))
+                acc
             }
-        })
-        .collect();
-
-    let to_polars_def: Vec<_> = fields
-        .iter()
-        .map(|(name, _, opts)| {
-            match opts.col.clone() {
-                Some(col) => {
-                    quote!(#col => self.#name)
-                },
-                None => {
-                    quote!(stringify!(#name) => self.#name)
-                }
+        });
+        if let Some(opt) = opt {
+            if let Some(apply) = opt.apply {
+                trans.push(quote!( (acc.#idx).push(#apply(item.#ident)) ));
+            } else {
+                trans.push(quote!( (acc.#idx).push(item.#ident) ));
             }
-        })
-        .collect();
-
-    let helper_def = quote! {
-        #[derive(Default)]
-        struct #helper {
-            #(#fields_def),*
+            if let Some(col) = opt.col {
+                to_df.push(quote!(stringify!(#col) => #ident));
+            } else {
+                to_df.push(quote!(stringify!(#ident) => #ident));
+            }
+        } else {
+            trans.push(quote!((acc.#idx).push(item.#ident)));
+            to_df.push(quote!(stringify!(#ident) => #ident));
         }
+        left_fields.push(ident);
+        init_tuple.push(quote!(vec![]));
+    }
 
-        impl #helper {
-            fn append(&mut self, item: #ident) {
-                #(#append_def);*
-            }
-
-            fn to_polars(self) -> polars::prelude::PolarsResult<polars::prelude::DataFrame> {
-                use polars::prelude::*;
-
-                polars::prelude::df! {
-                    #(#to_polars_def),*
-                }
-            }
-        }
-
-        
-    };
     quote!(
         impl #ident {
             pub fn to_polars(items: Vec<Self>) -> polars::prelude::PolarsResult<polars::prelude::DataFrame> {
-                #helper_def
-
-                items.into_iter().fold(#helper::default(), |mut acc, item| {
-                    acc.append(item);
+                use polars::prelude::*;
+                let (#(#left_fields),*) = items.into_iter().fold((#(#init_tuple),*), |mut acc, item| {
+                    #(#trans;)*
                     acc
-                }).to_polars()
-                
+                });
+
+                df!(#(#to_df),*)
             }
         }
     ).into()
